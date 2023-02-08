@@ -13,11 +13,15 @@ if ( ! defined( 'WPINC' ) ) {
 	die;
 }
 
-function oidc_keycloak_get_user_roles( $user_claims ) {
+function oidc_keycloak_get_user_roles( $user_claims, $client_id = null ) {
+    $roles = [];
     if ( isset($user_claims['realm_access']['roles']) ) {
-        return $user_claims['realm_access']['roles'];
+        array_push($roles, ...$user_claims['realm_access']['roles']);
     }
-    return [];
+    if ( $client_id && isset($user_claims['resource_access'][$client_id]['roles']) ) {
+        array_push($roles, ...$user_claims['resource_access'][$client_id]['roles']);
+    }
+    return $roles;
 }
 
 /**
@@ -181,7 +185,7 @@ function oidc_keycloak_user_creation_test( $result, $user_claim ) {
 		$roles = $wp_roles_obj->get_names();
 
 		// Check the user claim for idp roles to lookup the WordPress role mapping.
-        $idp_roles = oidc_keycloak_get_user_roles($user_claim);
+        $idp_roles = oidc_keycloak_get_user_roles($user_claim, $settings['client_id']);
 		if ( ! empty( $settings ) ) {
 			foreach ( $idp_roles as $idp_role ) {
 				foreach ( $roles as $role_id => $role_name ) {
@@ -218,7 +222,7 @@ function oidc_keycloak_map_user_role( $user, $user_claim ) {
 	$settings = get_option( 'openid_connect_generic_settings', array() );
 
 	// Check the user claim for idp roles to lookup the WordPress role for mapping.
-    $idp_roles = oidc_keycloak_get_user_roles($user_claim);
+    $idp_roles = oidc_keycloak_get_user_roles($user_claim, $settings['client_id']);
 	if ( ! empty( $settings ) ) {
 		// @var int $role_count
 		$role_count = 0;
