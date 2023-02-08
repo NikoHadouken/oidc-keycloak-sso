@@ -223,14 +223,18 @@ function oidc_keycloak_map_user_role( $user, $user_claim ) {
 		// @var int $role_count
 		$role_count = 0;
 
-		foreach ( $idp_roles as $idp_role ) {
 			foreach ( $roles as $role_id => $role_name ) {
-				if ( ! empty( $settings[ 'oidc_idp_' . strtolower( $role_name ) . '_roles' ] ) ) {
-					if ( in_array( $idp_role, explode( ';', $settings[ 'oidc_idp_' . strtolower( $role_name ) . '_roles' ] ) ) ) {
+            // skip non-configurable roles
+            if ( empty( $settings[ 'oidc_idp_' . strtolower( $role_name ) . '_roles' ] ) ) {
+                continue;
+            }
+            // idp roles for current wordpress role
+            $role_mappings = explode( ';', $settings[ 'oidc_idp_' . strtolower( $role_name ) . '_roles' ] );
+            if ( array_intersect($idp_roles, $role_mappings) ) {
 						$user->add_role( $role_id );
 						$role_count++;
-					}
-				}
+            } else {
+                $user->remove_role( $role_id );
 			}
 		}
 
