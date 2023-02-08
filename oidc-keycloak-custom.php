@@ -13,6 +13,13 @@ if ( ! defined( 'WPINC' ) ) {
 	die;
 }
 
+function oidc_keycloak_get_user_roles( $user_claims ) {
+    if ( isset($user_claims['realm_access']['roles']) ) {
+        return $user_claims['realm_access']['roles'];
+    }
+    return [];
+}
+
 /**
  * Modifies the OIDC login button text.
  *
@@ -173,9 +180,10 @@ function oidc_keycloak_user_creation_test( $result, $user_claim ) {
 		// @var array<string> $roles
 		$roles = $wp_roles_obj->get_names();
 
-		// Check the user claim for the `user-realm-role` key to lookup the WordPress role mapping.
-		if ( ! empty( $settings ) && ! empty( $user_claim['user-realm-role'] ) ) {
-			foreach ( $user_claim['user-realm-role'] as $idp_role ) {
+		// Check the user claim for idp roles to lookup the WordPress role mapping.
+        $idp_roles = oidc_keycloak_get_user_roles($user_claim);
+		if ( ! empty( $settings ) ) {
+			foreach ( $idp_roles as $idp_role ) {
 				foreach ( $roles as $role_id => $role_name ) {
 					if ( ! empty( $settings[ 'oidc_idp_' . strtolower( $role_name ) . '_roles' ] ) ) {
 						if ( in_array( $idp_role, explode( ';', $settings[ 'oidc_idp_' . strtolower( $role_name ) . '_roles' ] ) ) ) {
@@ -209,12 +217,13 @@ function oidc_keycloak_map_user_role( $user, $user_claim ) {
 	// @var array<mixed> $settings
 	$settings = get_option( 'openid_connect_generic_settings', array() );
 
-	// Check the user claim for the `user-realm-role` key to lookup the WordPress role for mapping.
-	if ( ! empty( $settings ) && ! empty( $user_claim['user-realm-role'] ) ) {
+	// Check the user claim for idp roles to lookup the WordPress role for mapping.
+    $idp_roles = oidc_keycloak_get_user_roles($user_claim);
+	if ( ! empty( $settings ) ) {
 		// @var int $role_count
 		$role_count = 0;
 
-		foreach ( $user_claim['user-realm-role'] as $idp_role ) {
+		foreach ( $idp_roles as $idp_role ) {
 			foreach ( $roles as $role_id => $role_name ) {
 				if ( ! empty( $settings[ 'oidc_idp_' . strtolower( $role_name ) . '_roles' ] ) ) {
 					if ( in_array( $idp_role, explode( ';', $settings[ 'oidc_idp_' . strtolower( $role_name ) . '_roles' ] ) ) ) {
