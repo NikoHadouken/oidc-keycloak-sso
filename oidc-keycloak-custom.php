@@ -37,8 +37,7 @@ function oidc_keycloak_get_user_roles($user_claims, $client_id = null)
  */
 function oidc_keycloak_login_button_text($text)
 {
-
-	// @var array<mixed> $settings
+	/** @var mixed[] */
 	$settings = get_option('openid_connect_generic_settings', array());
 
 	$text = (!empty($settings['oidc_login_button_text'])) ? strval($settings['oidc_login_button_text']) : __('Login with Keycloak', 'oidc-keycloak-mu-plugin');
@@ -111,10 +110,12 @@ add_filter('openid-connect-generic-settings-fields', 'oidc_keycloak_add_require_
 function oidc_keycloak_add_default_role_setting($fields)
 {
 
-	// @var WP_Roles $wp_roles_obj
+	/** @var WP_Roles */
 	$wp_roles_obj = wp_roles();
-	// @var array<string> $roles
+
+	/** @var string[] */
 	$roles = $wp_roles_obj->get_names();
+
 	// Prepend a blank role as the default.
 	array_unshift($roles, '-- None --');
 
@@ -143,9 +144,10 @@ add_filter('openid-connect-generic-settings-fields', 'oidc_keycloak_add_default_
 function oidc_keycloak_role_mapping_setting($fields)
 {
 
-	// @var WP_Roles $wp_roles_obj
+	/** @var WP_Roles $wp_roles_obj */
 	$wp_roles_obj = wp_roles();
-	// @var array<string> $roles
+
+	/** @var string[]  */
 	$roles = $wp_roles_obj->get_names();
 
 	foreach ($roles as $role) {
@@ -175,16 +177,18 @@ add_filter('openid-connect-generic-settings-fields', 'oidc_keycloak_role_mapping
 function oidc_keycloak_user_creation_test($result, $user_claim)
 {
 
-	// @var array<mixed> $settings
+	/** @var mixed[] */
 	$settings = get_option('openid_connect_generic_settings', array());
 
 	// If the custom IDP role requirement setting is enabled validate user claim.
 	if (!empty($settings['require_idp_user_role']) && boolval($settings['require_idp_user_role'])) {
 		// The default is to not create an account unless a mapping is found.
 		$result = false;
-		// @var WP_Roles $wp_roles_obj
+
+		/** @var WP_Roles */
 		$wp_roles_obj = wp_roles();
-		// @var array<string> $roles
+
+		/** @var string[] */
 		$roles = $wp_roles_obj->get_names();
 
 		// Check the user claim for idp roles to lookup the WordPress role mapping.
@@ -216,18 +220,18 @@ add_filter('openid-connect-generic-user-creation-test', 'oidc_keycloak_user_crea
  */
 function oidc_keycloak_map_user_role($user, $user_claim)
 {
-
-	// @var WP_Roles $wp_roles_obj
+	/** @var WP_Roles */
 	$wp_roles_obj = wp_roles();
-	// @var array<string> $roles
+
+	/** @var string[]  */
 	$roles = $wp_roles_obj->get_names();
-	// @var array<mixed> $settings
+
+	/** @var mixed[] */
 	$settings = get_option('openid_connect_generic_settings', array());
 
 	// Check the user claim for idp roles to lookup the WordPress role for mapping.
 	$idp_roles = oidc_keycloak_get_user_roles($user_claim, $settings['client_id']);
 	if (!empty($settings)) {
-		// @var int $role_count
 		$role_count = 0;
 
 		foreach ($roles as $role_id => $role_name) {
