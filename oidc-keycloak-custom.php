@@ -4,6 +4,22 @@
  * Plugin Name: OpenID Connect Client Customizations
  * Description: Provides customizations for the OpenID Connect Client plugin.
  *
+ * Features:
+ *  - Customize Login Button Text
+ *  - Require IdP role for user creation
+ *  - Role mapping from IdP to wordpress roles
+ * 		- roles are mapped on user creation and login
+ *  - Set default wordpress role when user has no roles mapped
+ *
+ *  - keycloak api client
+ *  - create keycloak user in woocommerce checkout
+ *  - prevent updating user email, firstName, lastName on My Account page
+ *  - wp user bulk action to create missing wordpress users in keycloak
+ *  - show keycloak user id in user profile (admin)
+ *  - show keycloak user id in user table column
+ *  - find users via keycloak user id (subject identity) in rest api
+ *  - overwrite login_type to button via query param
+ *
  * @package  OpenidConnectGeneric_MuPlugin
  *
  * @link     https://github.com/daggerhart/openid-connect-generic
@@ -13,6 +29,8 @@
 if (!defined('WPINC')) {
 	die;
 }
+
+
 
 function oidc_keycloak_get_user_roles($user_claims, $client_id = null)
 {
@@ -322,6 +340,16 @@ function oidc_keycloak_add_api_credentials_setting($fields)
 }
 add_filter('openid-connect-generic-settings-fields', 'oidc_keycloak_add_api_credentials_setting', 10, 1);
 
+class OIDC_KeycloakClientException extends \Exception
+{
+	public \WpOrg\REquests\Response $res;
+
+	public function __construct(string $message, \WpOrg\REquests\Response $res)
+	{
+		$this->res = $res;
+		parent::__construct($message);
+	}
+}
 
 class OIDC_Keycloak_Client
 {
@@ -344,23 +372,28 @@ class OIDC_Keycloak_Client
 		$data = [],
 		array $headers = [],
 	) {
-		$res = Requests::request("{$this->base_url}/{$endpoint}", [
+		$res = \WpOrg\Requests\Requests::request("{$this->base_url}/{$endpoint}", [
 			...$headers,
 			'Authorization' => "Bearer {$this->get_token()}",
 		], $data, $method);
+
+		if ($res->status_code >= 400 && $res->status_code <= 600) {
+			throw new OIDC_KeycloakClientException("request {$method} {$endpoint} failed", $res);
+		}
 
 		return $res;
 	}
 
 	private function get_token()
 	{
+		delete_transient(self::TOKEN_TRANSIENT_KEY);
 		$token = get_transient(self::TOKEN_TRANSIENT_KEY);
 
 		if ($token) {
 			return $token;
 		}
 
-		$res = Requests::post("{$this->base_url}/realms/{$this->realm}/protocol/openid-connect/token", [
+		$res = \WpOrg\Requests\Requests::post("{$this->base_url}/realms/{$this->realm}/protocol/openid-connect/token", [
 			'content-type' => 'application/x-www-form-urlencoded',
 		], [
 			'grant_type' => 'client_credentials',
@@ -369,7 +402,7 @@ class OIDC_Keycloak_Client
 		]);
 
 		if ($res->status_code >= 400 && $res->status_code <= 600) {
-			throw new \RuntimeException('failed to get access token');
+			throw new OIDC_KeycloakClientException('failed to get access token', $res);
 		}
 
 		[
@@ -391,7 +424,7 @@ class OIDC_Keycloak_Client
 
 		if ($email) {
 			$params['email'] = $email;
-		};
+		}
 
 		if ($username) {
 			$params['username'] = $username;
@@ -402,10 +435,6 @@ class OIDC_Keycloak_Client
 		}
 
 		$res = $this->request('GET', "admin/realms/{$this->realm}/users", $params);
-
-		if ($res->status_code >= 400 && $res->status_code <= 600) {
-			throw new \RuntimeException('find users failed');
-		}
 
 		return json_decode($res->body, true);
 	}
@@ -424,6 +453,7 @@ class OIDC_Keycloak_Client
 		string $firstName = '',
 		string $lastName = '',
 		string $password = '',
+		string $passwordHash = '',
 	) {
 		$user = [
 			'enabled' => true,
@@ -441,6 +471,21 @@ class OIDC_Keycloak_Client
 			];
 		}
 
+		if ($passwordHash) {
+			$user['credentials'] = [
+				[
+					'type' => 'password',
+					'secretData' => json_encode([
+						'value' => $passwordHash,
+						"salt" => "",
+						"additionalParameters" => new stdClass(),
+					]),
+					'credentialData' => '{"hashIterations":8,"algorithm":"phpass","additionalParameters":{}}',
+					'temporary' => false,
+				],
+			];
+		}
+
 		if ($firstName) {
 			$user['firstName'] = $firstName;
 		}
@@ -449,13 +494,31 @@ class OIDC_Keycloak_Client
 			$user['lastName'] = $lastName;
 		}
 
-		$res = $this->request('POST', "admin/realms/{$this->realm}/users", json_encode($user), [
+		$this->request('POST', "admin/realms/{$this->realm}/users", json_encode($user), [
 			'Content-Type' => 'application/json',
 		]);
+	}
 
-		if ($res->status_code >= 400 && $res->status_code <= 600) {
-			throw new \RuntimeException('create user failed');
+	public function update_user(
+		string $userId,
+		string $firstName = '',
+		string $lastName = '',
+	) {
+		$user = [
+			'enabled' => true,
+		];
+
+		if ($firstName) {
+			$user['firstName'] = $firstName;
 		}
+
+		if ($lastName) {
+			$user['lastName'] = $lastName;
+		}
+
+		$this->request('PUT', "admin/realms/{$this->realm}/users/{$userId}", json_encode($user), [
+			'Content-Type' => 'application/json',
+		]);
 	}
 }
 
@@ -489,6 +552,43 @@ function oidc_keycloak_get_client()
 }
 
 
+function oidc_keycloak_get_password_policy_violations(string $password, string $email, string $username)
+{
+	$violations = [];
+	if (strlen($password) < 8) {
+		$violations[] = [
+			'policy' => 'min_length',
+			'message' => __('Passwort muss mindestens 8 Zeichen lang sein', 'storl'),
+		];
+	}
+	if (str_contains($password, $email)) {
+		$violations[] = [
+			'policy' => 'not_email',
+			'message' => __('Passwort darf nicht die email enthalten', 'storl'),
+		];
+	}
+	if (str_contains($password, $username)) {
+		$violations[] = [
+			'policy' => 'not_username',
+			'message' => __('Passwort darf nicht den Username enthalten', 'storl'),
+		];
+	}
+	if (!preg_match('/\d/', $password)) {
+		$violations[] = [
+			'policy' => 'digits',
+			'message' => __('Passwort muss mindestens eine Ziffer enthalten', 'storl'),
+		];
+	}
+	if (!preg_match('/[A-Z]/', $password)) {
+		$violations[] = [
+			'policy' => 'uppercase_characters',
+			'message' => __('Passwort muss mindestens einen Großbuchtaben enthalten enthalten', 'storl'),
+		];
+	}
+	return $violations;
+}
+
+
 /**
  * Monkey patch woocommerce function used on checkout to create keycloak user via api request.
  *
@@ -504,58 +604,78 @@ function wc_create_new_customer($email, $username = '', $password = '', $args = 
 {
 	$keycloak = oidc_keycloak_get_client();
 
-	$email_exists = function (string $email) use ($keycloak) {
-		if (!$keycloak) {
-			return email_exists($email);
-		}
-		try {
-			return !!$keycloak->find_user(email: $email, exact: true);
-		} catch (\Throwable $e) {
-			error_log('wc_create_new_customer: find user by email failed: ' . $e->getMessage());
-			return email_exists($email);
-		}
-	};
+	if (!$keycloak) {
+		return new \WP_Error('create_kc_user_failed', 'Benutzerkonto konnte nicht angelegt werden');
+	}
 
-	$username_exists = function (string $username) use ($keycloak) {
-		if (!$keycloak) {
-			return username_exists($username);
-		}
-		try {
-			return !!$keycloak->find_user(username: $username, exact: true);
-		} catch (\Throwable $e) {
-			error_log('wc_create_new_customer: find user by username failed: ' . $e->getMessage());
-			return username_exists($username);
-		}
-	};
 
 	$create_user = function (array $new_customer_data) use ($keycloak) {
-		if ($keycloak) {
-			try {
-				$keycloak->create_user(
-					username: $new_customer_data['user_login'],
-					email: $new_customer_data['user_email'],
-					password: $new_customer_data['user_pass'],
-					firstName: $new_customer_data['first_name'],
-					lastName: $new_customer_data['last_name'],
-				);
-			} catch (\Throwable $e) {
-				error_log('wc_create_new_customer: create user failed: ' . $e->getMessage());
+		if (!$keycloak) {
+			return wp_insert_user($new_customer_data);
+		}
+
+		// keycloak user did not exist but wp user is somehow present
+		// user needs to verify email
+		$user = get_user_by('email', $new_customer_data['user_email']);
+
+		if ($user) {
+			return new \WP_Error('create_kc_user_failed', "WP User already exists");
+			// $user->user_login = $new_customer_data['user_login'];
+			$user->user_pass = $new_customer_data['user_pass'];
+			$customer_id = wp_update_user($user);
+		}
+
+		$kc_user = null;
+		try {
+			$keycloak->create_user(
+				username: $new_customer_data['user_login'],
+				email: $new_customer_data['user_email'],
+				password: $new_customer_data['user_pass'],
+				firstName: $new_customer_data['first_name'],
+				lastName: $new_customer_data['last_name'],
+			);
+		} catch (\Throwable $e) {
+			$message = $e->getMessage();
+			error_log('wc_create_new_customer: create keycloak user failed: ' . $e->getMessage());
+			if ($e instanceof OIDC_KeycloakClientException) {
+				error_log($e->res->status_code);
+				error_log($e->res->body);
+
+				try {
+					[
+						'errorMessage' => $errorMessage,
+					] = json_decode($e->res->body, true);
+					$message = $errorMessage;
+				} catch (\Throwable $e) {
+					// ignore
+				}
 			}
+			return new \WP_Error('create_kc_user_failed', $message);
 		}
 
 		$customer_id = wp_insert_user($new_customer_data);
 
-		if ($keycloak && class_exists('OpenID_Connect_Generic')) {
+		if (is_wp_error($customer_id)) {
+			return $customer_id;
+		}
+
+
+		// link keycloak uuid to user via daggerhart plugin
+		if (class_exists('OpenID_Connect_Generic')) {
+			$kc_user = null;
 			try {
-				$user = $keycloak->find_user(email: $new_customer_data['user_email'], exact: true);
+				$kc_user = $keycloak->find_user(email: $new_customer_data['user_email'], exact: true);
 			} catch (\Throwable $e) {
-				$user = null;
 				error_log('wc_create_new_customer: find new user failed: ' . $e->getMessage());
+				if ($e instanceof OIDC_KeycloakClientException) {
+					error_log($e->res->status_code);
+					error_log($e->res->body);
+				}
 			}
 
-			if ($user) {
+			if ($kc_user) {
 				$client_wrapper = OpenID_Connect_Generic::instance()->client_wrapper;
-				$client_wrapper->update_existing_user($customer_id, $user['id']);
+				$client_wrapper->update_existing_user($customer_id, $kc_user['id']);
 			}
 		}
 
@@ -566,9 +686,15 @@ function wc_create_new_customer($email, $username = '', $password = '', $args = 
 		return new WP_Error('registration-error-invalid-email', __('Please provide a valid email address.', 'woocommerce'));
 	}
 
-	if ($email_exists($email)) {
-		return new WP_Error('registration-error-email-exists', apply_filters('woocommerce_registration_error_email_exists', __('An account is already registered with your email address. <a href="#" class="showlogin">Please log in.</a>', 'woocommerce'), $email));
+	try {
+		$email_exists = $keycloak ? !!$keycloak->find_user(email: $email, exact: true) : email_exists($email);
+		if ($email_exists) {
+			return new WP_Error('registration-error-email-exists', apply_filters('woocommerce_registration_error_email_exists', __('Für diese Email Adresse existiert bereits ein Kundenkonto. <a href="/login">Bitte melde dich an.</a>', 'storl'), $email));
+		}
+	} catch (OIDC_KeycloakClientException $e) {
+		return new WP_Error('registration-error-keycloak', $e->getMessage());
 	}
+
 
 	if ('yes' === get_option('woocommerce_registration_generate_username', 'yes') && empty($username)) {
 		$username = wc_create_new_customer_username($email, $args);
@@ -580,8 +706,15 @@ function wc_create_new_customer($email, $username = '', $password = '', $args = 
 		return new WP_Error('registration-error-invalid-username', __('Please enter a valid account username.', 'woocommerce'));
 	}
 
-	if ($username_exists($username)) {
-		return new WP_Error('registration-error-username-exists', __('An account is already registered with that username. Please choose another.', 'woocommerce'));
+	// check existing username
+	try {
+		// username may not be taken in keycloak or wordpress
+		$username_exists = $keycloak ? !!$keycloak->find_user(username: $username, exact: true) : username_exists($username);
+		if ($username_exists) {
+			return new WP_Error('registration-error-username-exists', __('An account is already registered with that username. Please choose another.', 'woocommerce'));
+		}
+	} catch (OIDC_KeycloakClientException $e) {
+		return new WP_Error('registration-error-keycloak', $e->getMessage());
 	}
 
 	// Handle password creation.
@@ -593,6 +726,11 @@ function wc_create_new_customer($email, $username = '', $password = '', $args = 
 
 	if (empty($password)) {
 		return new WP_Error('registration-error-missing-password', __('Please enter an account password.', 'woocommerce'));
+	}
+
+	$violations = oidc_keycloak_get_password_policy_violations($password, $email, $username);
+	if ($violations) {
+		return new WP_Error('registration-error-invalid-password', current($violations)['message']);
 	}
 
 	// Use WP_Error to handle registration errors.
@@ -629,3 +767,328 @@ function wc_create_new_customer($email, $username = '', $password = '', $args = 
 
 	return $customer_id;
 }
+
+/**
+ * show keycloak user id on users table
+ */
+function oidc_keycloak_user_table_columns($column)
+{
+	$column['keycloak_user_id'] = 'Keycloak User Id';
+	return $column;
+}
+add_filter('manage_users_columns', 'oidc_keycloak_user_table_columns');
+
+function oidc_keycloak_output_keycloak_userid_column($val, $column_name, $user_id)
+{
+	if ($column_name === 'keycloak_user_id') {
+		return $user_id = get_user_meta($user_id, 'openid-connect-generic-subject-identity', true);
+	}
+	return $val;
+}
+add_filter('manage_users_custom_column', 'oidc_keycloak_output_keycloak_userid_column', 10, 3);
+
+
+/**
+ * show keycloak user id on profile page
+ */
+add_action('show_user_profile', 'oidc_keycloak_display_user_id_on_user_profile', 5);
+add_action('edit_user_profile', 'oidc_keycloak_display_user_id_on_user_profile', 5);
+function oidc_keycloak_display_user_id_on_user_profile(WP_User $user)
+{
+	$user_id = get_user_meta($user->ID, 'openid-connect-generic-subject-identity', true);
+?>
+	<h3>Keycloak</h3>
+
+	<table class="form-table" role="presentation">
+		<tbody>
+			<tr class="user-user-login-wrap">
+				<th><label for="user_login">User ID</label></th>
+				<td><input type="text" class="regular-text" disabled value="<?php _e($user_id) ?>" /><span class="description">User ID kann nicht geändert werden.</span></td>
+			</tr>
+		</tbody>
+	</table>
+<?php
+}
+
+
+function oidc_keycloak_get_wp_users_by_ids(array $user_ids)
+{
+	$users = get_users([
+		'include' => $user_ids,
+	]);
+
+	return array_reduce($users, function ($arr, $user) {
+		$arr[$user->ID] = $user;
+		return $arr;
+	}, $users);
+}
+
+/**
+ * add bulk action to sync wordpress users to keycloak
+ */
+add_filter('bulk_actions-users', function (array $bulk_actions) {
+	$bulk_actions['sync-to-keycloak'] = __('Sync To Keycloak', 'oidc-keycloak-mu-plugin');
+	return $bulk_actions;
+});
+
+
+add_filter('handle_bulk_actions-users', function (string $redirect, string $action, array $user_ids) {
+
+	if ($action !== 'sync-to-keycloak') {
+		return $redirect;
+	}
+
+	$keycloak = oidc_keycloak_get_client();
+	if (!$keycloak) {
+		$redirect = add_query_arg(
+			'kc_sync_error',
+			'Keycloak client not configured.',
+			$redirect,
+		);
+		return $redirect;
+	}
+
+	$sync_count = 0;
+	$skip_count = 0;
+	$errors = [];
+	$addError = function ($user_id, string $error_message) use (&$errors) {
+		$errors[$user_id] = $error_message;
+	};
+
+	$wp_users = oidc_keycloak_get_wp_users_by_ids($user_ids);
+
+	foreach ($user_ids as $user_id) {
+		$user = $wp_users[$user_id] ?? null;
+		if (!$user) {
+			$addError($user_id, 'User not found');
+			continue;
+		}
+		$kc_user = $keycloak->find_user(email: $user->user_email, exact: true);
+		if ($kc_user) {
+			$skip_count++;
+			continue;
+		}
+
+		try {
+			$keycloak->create_user(
+				username: $user->user_login,
+				email: $user->user_email,
+				firstName: $user->first_name,
+				lastName: $user->last_name,
+				passwordHash: $user->user_pass,
+			);
+			$sync_count++;
+		} catch (\Throwable $e) {
+			$addError($user_id, $e->getMessage());
+		}
+	}
+
+	if ($sync_count) {
+		$redirect = add_query_arg(
+			'kc_synced_users',
+			$sync_count,
+			$redirect,
+		);
+	}
+
+	if ($skip_count) {
+		$redirect = add_query_arg(
+			'kc_skipped_users',
+			$skip_count,
+			$redirect,
+		);
+	}
+
+	foreach ($errors as $user_id => $error_message) {
+		$redirect = add_query_arg(
+			"kc_sync_user_error[{$user_id}]",
+			$error_message,
+			$redirect,
+		);
+	}
+
+	return $redirect;
+}, 10, 3);
+
+
+add_action('admin_notices', function () {
+	if (!empty($_REQUEST['kc_synced_users'])) {
+		$synced_users = (int) $_REQUEST['kc_synced_users'];
+		$message = sprintf(
+			_n(
+				'%d user has been synced to Keycloak.',
+				'%d users have been synced to Keycloak.',
+				$synced_users
+			),
+			$synced_users
+		);
+
+		echo "<div class=\"updated notice is-dismissible\"><p>{$message}</p></div>";
+	}
+
+	if (!empty($_REQUEST['kc_skipped_users'])) {
+		$skipped_users = (int) $_REQUEST['kc_skipped_users'];
+		$message = sprintf(
+			_n(
+				'%d user already in Keycloak.',
+				'%d users already in Keycloak.',
+				$skipped_users
+			),
+			$skipped_users
+		);
+
+		echo "<div class=\"updated notice is-dismissible\"><p>{$message}</p></div>";
+	}
+
+	if (!empty($_REQUEST['kc_sync_error'])) {
+		echo "<div class=\"updated notice is-dismissible error\"><p>{$_REQUEST['update_error']}</p>";
+	}
+
+	if (!empty($_REQUEST['kc_sync_user_error']) && is_array($_REQUEST['kc_sync_user_error'])) {
+		$user_ids = array_map(fn ($id) => intval($id), array_keys($_REQUEST['kc_sync_user_error']));
+
+		$users = oidc_keycloak_get_wp_users_by_ids($user_ids);
+
+		echo "<div class=\"updated notice is-dismissible error\"><p>Updating users failed:</p>";
+
+		foreach ($_REQUEST['kc_sync_user_error'] as $user_id => $error_message) {
+			$username = $users[$user_id]?->user_login ?? $user_id;
+			$message = sprintf("%s: %s", $username, $error_message);
+			echo "<p>{$message}</p>";
+		}
+
+		echo "</div>";
+	}
+});
+
+add_filter('removable_query_args', function (array $removable_query_args) {
+	return array_merge($removable_query_args, ['kc_sync_user_error', 'kc_skipped_users', 'kc_synced_users']);
+});
+
+
+/**
+ * Rest API
+ *
+ * Find users by subject identity.
+ *
+ * @see wp-includes/rest-api/endpoints/class-wp-rest-users-controller.php
+ */
+
+add_filter('rest_user_collection_params', function ($query_params) {
+	$query_params['subject_identity'] = array(
+		'description' => __('Limit result set to users with given subject identity (keycloak user id).'),
+		'type'        => 'array',
+		'items'       => array(
+			'type' => 'string',
+		),
+		'default'     => array(),
+	);
+
+	return $query_params;
+});
+
+add_filter('rest_user_query', function ($prepared_args, $request) {
+	$user_ids = $request['subject_identity'] ?? [];
+	if ($user_ids) {
+		$prepared_args['meta_query'] = [
+			...($prepared_args['meta_query'] ?? []),
+			[
+				'key'     => 'openid-connect-generic-subject-identity',
+				'value'   => $user_ids,
+				'compare' => 'IN'
+			],
+		];
+	}
+	return $prepared_args;
+}, 10, 2);
+
+
+/**
+ * prevent editing user details on woocommerce my account page
+ * wp-content/plugins/woocommerce/includes/class-wc-form-handler.php
+ */
+add_action('woocommerce_save_account_details_errors', function ($errors, $user) {
+	$protected_fields = [
+		// 'first_name' => __('First name', 'woocommerce'),
+		// 'last_name' => __('Last name', 'woocommerce'),
+		'user_email' => __('Email address', 'woocommerce'),
+		'user_pass' => __('Password', 'woocommerce'),
+	];
+
+	foreach ($protected_fields as $field => $label) {
+		if (isset($user->$field)) {
+			$errors->add("save-account-error", sprintf(__('Feld %s muss über Storl Konto geändert werden', 'storl'), $label));
+		}
+	}
+}, 10, 2);
+
+
+add_filter('woocommerce_save_account_details_required_fields', function ($required_fields) {
+	$remove = [
+		// 'account_first_name',
+		// 'account_last_name',
+		'account_email',
+	];
+	return array_filter($required_fields, fn ($key) => !in_array($key, $remove), ARRAY_FILTER_USE_KEY);
+}, 10, 1);
+
+
+/**
+ * hack to show login button instead of automatic redirect based on query param
+ * certian constants can be used to overwrite the settings stored in the db
+ */
+if (!defined('OIDC_LOGIN_TYPE') && isset($_GET['force_login_form'])) {
+	define('OIDC_LOGIN_TYPE', 'button');
+}
+
+function oidc_keycloak_is_rest_api_request()
+{
+	if (empty($_SERVER['REQUEST_URI'])) {
+		return false;
+	}
+
+	$rest_prefix         = trailingslashit(rest_get_url_prefix());
+	$is_rest_api_request = (false !== strpos($_SERVER['REQUEST_URI'], $rest_prefix)); // phpcs:disable WordPress.Security.ValidatedSanitizedInput.MissingUnslash, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+
+	return $is_rest_api_request;
+}
+
+/**
+ * store the current url to the session and use it for the redirect_to after login
+ */
+add_action('init', function () {
+	global $wp, $pagenow;
+
+	if (is_user_logged_in()) {
+		if (isset($_COOKIE['oidc_login_redirect'])) {
+			setcookie('oidc_login_redirect', '', time() - 1, COOKIEPATH, COOKIE_DOMAIN, true, true);
+		}
+		return;
+	}
+
+	if (!wp_using_themes() || wp_doing_ajax() || oidc_keycloak_is_rest_api_request()) {
+		return;
+	}
+
+	// don't save redirect on login page
+	if ('wp-login.php' == $pagenow || '/login/' === trailingslashit($_SERVER['REQUEST_URI'])) {
+		return;
+	}
+
+	if (!empty($wp->did_permalink) && boolval($wp->did_permalink) === true) {
+		$redirect_url = add_query_arg($_GET, trailingslashit($wp->request));
+	} else {
+		$redirect_url = add_query_arg(null, null);
+	}
+
+	setcookie('oidc_login_redirect', $redirect_url, time() + 1 * DAY_IN_SECONDS, COOKIEPATH, COOKIE_DOMAIN, true, true);
+});
+
+add_filter('openid-connect-generic-client-redirect-to', function ($url) {
+
+	if (isset($_COOKIE['oidc_login_redirect'])) {
+		$url = home_url($_COOKIE['oidc_login_redirect']);
+	}
+
+	return $url;
+});
