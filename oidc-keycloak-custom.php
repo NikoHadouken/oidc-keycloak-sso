@@ -630,9 +630,9 @@ function wc_create_new_customer($email, $username = '', $password = '', $args = 
 			$keycloak->create_user(
 				username: $new_customer_data['user_login'],
 				email: $new_customer_data['user_email'],
-				password: $new_customer_data['user_pass'],
-				firstName: $new_customer_data['first_name'],
-				lastName: $new_customer_data['last_name'],
+				password: $new_customer_data['user_pass'] ?? '',
+				firstName: $new_customer_data['first_name'] ?? '',
+				lastName: $new_customer_data['last_name'] ?? '',
 			);
 		} catch (\Throwable $e) {
 			$message = $e->getMessage();
