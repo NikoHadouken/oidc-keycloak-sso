@@ -863,23 +863,39 @@ add_filter('handle_bulk_actions-users', function (string $redirect, string $acti
 			$addError($user_id, 'User not found');
 			continue;
 		}
+
+		// check if user exist in keycloak
 		$kc_user = $keycloak->find_user(email: $user->user_email, exact: true);
-		if ($kc_user) {
-			$skip_count++;
-			continue;
+
+		// if user does exist in keycloak, create it
+		if (!$kc_user) {
+			try {
+				$keycloak->create_user(
+					username: $user->user_login,
+					email: $user->user_email,
+					firstName: $user->first_name,
+					lastName: $user->last_name,
+					passwordHash: $user->user_pass,
+				);
+				// after creation fetch the user again for the id
+				$kc_user = $keycloak->find_user(email: $user->user_email, exact: true);
+			} catch (\Throwable $e) {
+				$addError($user_id, $e->getMessage());
+				continue;
+			}
 		}
 
-		try {
-			$keycloak->create_user(
-				username: $user->user_login,
-				email: $user->user_email,
-				firstName: $user->first_name,
-				lastName: $user->last_name,
-				passwordHash: $user->user_pass,
-			);
-			$sync_count++;
-		} catch (\Throwable $e) {
-			$addError($user_id, $e->getMessage());
+		// sync the keycloak user id from the existing user or newly created one to wordpress
+		if ($kc_user) {
+			try {
+				$client_wrapper = OpenID_Connect_Generic::instance()->client_wrapper;
+				$client_wrapper->update_existing_user($user_id, $kc_user['id']);
+				$sync_count++;
+			} catch (\Throwable $e) {
+				$addError($user_id, $e->getMessage());
+			}
+		} else {
+			$skip_count++;
 		}
 	}
 
